@@ -1,5 +1,4 @@
 #!/bin/bash
-
 SCRIPT_PATH=$(dirname "$(readlink -e "$BASH_SOURCE")")
 SCRIPT_NAME=$(basename "$BASH_SOURCE")
 SERVICE_NAME="custom-routes"
