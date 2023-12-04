@@ -68,10 +68,11 @@ ip route show table $TABLE_NUMBER
 
 # Remove the default rule for this interface from the main table
 if isPrivateIP $INTERFACE_IP; then
-        echo "$INTERFACE_IP is a private IP address. Skipping route deletion."
-    else
-        echo "$INTERFACE_IP is a public IP address. Deleting the default route for $INTERFACE."
+        echo "$INTERFACE_IP is a private IP address. Deleting the default route for $INTERFACE."
         ip route del default dev $INTERFACE
+    else
+        echo "$INTERFACE_IP is a public IP address. Skipping route deletion."
+        
     fi
 
 done
