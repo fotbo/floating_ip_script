@@ -5,6 +5,19 @@ SERVICE_NAME="custom-routes"
 echo "SCRIPT_PATH=$SCRIPT_PATH"
 echo "SCRIPT_NAME=$SCRIPT_NAME"
 echo "-------------------------------------------"
+
+# if input = "restore", then remove service and stop script
+if [ "$1" == "restore" ]; then
+    echo "Restoring..."
+    sudo systemctl stop $SERVICE_NAME
+    sudo systemctl disable $SERVICE_NAME
+    sudo rm /etc/systemd/system/$SERVICE_NAME.service
+    sudo rm /usr/local/bin/$SCRIPT_NAME
+    echo "Service $SERVICE_NAME removed. Please reboot the server to restore routing tables and routes as default."
+    exit 0
+fi
+
+
 if [ "$SCRIPT_PATH" != "/usr/local/bin" ]; then
     cp $SCRIPT_PATH/$SCRIPT_NAME /usr/local/bin/$SCRIPT_NAME
     echo "Scrit copied to bin directory"
