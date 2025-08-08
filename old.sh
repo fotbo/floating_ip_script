@@ -16,29 +16,16 @@ if [ "$1" == "restore" ]; then
     echo "Service $SERVICE_NAME removed. Please reboot the server to restore routing tables and routes as default."
     exit 0
 fi
-sleep 5
 
-# Get a list of all interfaces except lo
-#INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v 'lo')
-INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
-
-
-VALID_INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' \
-    | while read IFACE; do ip route show dev "$IFACE" | grep -qw 'default' && echo "$IFACE"; done)
-
-COUNT=$(echo "$VALID_INTERFACES" | wc -w)
-if [ "$COUNT" -ne 2 ]; then
-    echo "Error: finded $COUNT interfaces with default route. It was expected 2."
-    echo "Check the status and address of interface lead to the virtual local network"
-    exit 1
-fi
 
 if [ "$SCRIPT_PATH" != "/usr/local/bin" ]; then
     cp $SCRIPT_PATH/$SCRIPT_NAME /usr/local/bin/$SCRIPT_NAME
     echo "Scrit copied to bin directory"
 fi
 chmod 755 /usr/local/bin/$SCRIPT_NAME
-
+sleep 5
+# Get a list of all interfaces except lo
+INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v 'lo')
 
 isPrivateIP() {
     local ip=$1
@@ -46,9 +33,7 @@ isPrivateIP() {
     [[ $ip == 10.* || $ip == 172.1[6-9].* || $ip == 172.2[0-9].* || $ip == 172.3[0-1].* || $ip == 192.168.* ]]
 }
 
-#  -- main  Cycle--
-
-for INTERFACE in  $VALID_INTERFACES
+for INTERFACE in $INTERFACES
 do
 echo "------------------------------------------ begin cycle------------------------------------------------"
 echo ""
