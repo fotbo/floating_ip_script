@@ -16,22 +16,36 @@ if [ "$1" == "restore" ]; then
     echo "Service $SERVICE_NAME removed. Please reboot the server to restore routing tables and routes as default."
     exit 0
 fi
-sleep 5
-
-# Get a list of all interfaces except lo
-#INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v 'lo')
-INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
+sleep 5 # Waiting upping interfaces - for as service run
 
 
-VALID_INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' \
-    | while read IFACE; do ip route show dev "$IFACE" | grep -qw 'default' && echo "$IFACE"; done)
+# --  Filtering interfaces ------
 
-COUNT=$(echo "$VALID_INTERFACES" | wc -w)
-if [ "$COUNT" -ne 2 ]; then
-    echo "Error: finded $COUNT interfaces with default route. It was expected 2."
-    echo "Check the status and address of interface lead to the virtual local network"
+# Raw candidates: everyone except the obvious "garbage"
+CANDIDATES=$(ip -o link show | awk -F': ' '{print $2}' \
+  | grep -Ev '^(lo|docker0|docker[0-9-].*|br.*|veth.*|virbr.*|vnet.*|tun.*|tap.*|wg.*|ppp.*|vti.*|ipip.*|sit.*|gre.*|gretap.*|erspan.*|vxlan.*|geneve.*|macvtap.*|macvlan.*|ipvlan.*|ifb.*|dummy.*|bond.*|team.*|ovs-system|ovs.*|patch-.*|nlmon.*)$' )
+
+# Let's leave only those who have real IPv4
+INTERFACES=""
+for IF in $CANDIDATES; do
+    # The interface must be up and have IPv4
+    if [ "$(cat /sys/class/net/$IF/operstate 2>/dev/null)" = "up" ] && \
+       ip -o -4 addr show dev "$IF" | awk '{print $4}' | grep -q . ; then
+        INTERFACES+="$IF "
+    fi
+done
+INTERFACES=$(echo "$INTERFACES" | xargs)  # trim spases
+
+echo "list of interfaces: $INTERFACES"
+
+# We require at least 2 interfaces with valid IPv4
+COUNT=$(wc -w <<< "$INTERFACES")
+if [ "$COUNT" -lt 2 ]; then
+    echo "Error: found $COUNT upstream interface(s). Expected at least 2."
+    echo "Check that both (or more) uplink interfaces are UP and have valid IPv4 addresses."
     exit 1
 fi
+# -- End  filtering interfaces ------
 
 if [ "$SCRIPT_PATH" != "/usr/local/bin" ]; then
     cp $SCRIPT_PATH/$SCRIPT_NAME /usr/local/bin/$SCRIPT_NAME
@@ -39,6 +53,43 @@ if [ "$SCRIPT_PATH" != "/usr/local/bin" ]; then
 fi
 chmod 755 /usr/local/bin/$SCRIPT_NAME
 
+# --- helpers  block -------
+
+# --- helper: derive gateway as first host of interface's subnet ---
+derive_gateway_from_iface() {
+    local IFACE="$1"
+    # Let's take the first IPv4 CIDR of this interface
+    local CIDR
+    CIDR=$(ip -o -f inet addr show dev "$IFACE" | awk '{print $4}' | head -n1)
+    [ -z "$CIDR" ] && { echo ""; return 0; }
+
+    local GW=""
+    if command -v ipcalc >/dev/null 2>&1; then
+        # ipcalc outputs a line like: "HostMin: 185.253.7.1"
+        GW=$(ipcalc "$CIDR" 2>/dev/null | awk '/HostMin:/ {print $2}' | head -n1)
+        # On some ipcalc the format is different; attempt #2:
+        [ -z "$GW" ] && GW=$(ipcalc -n "$CIDR" 2>/dev/null | awk -F= '/^HOSTMIN=/{print $2}' | head -n1)
+    fi
+
+    if [ -z "$GW" ] && command -v python3 >/dev/null 2>&1; then
+        # Reliable fallback without ipcalc: calculating network+1 via ipaddress
+        GW=$(python3 - <<PY
+import ipaddress
+net = ipaddress.ip_network("$CIDR", strict=False)
+print(str(net[1] if net.num_addresses >= 2 else net.network_address))
+PY
+)
+    fi
+
+    # Last rough fallback: .1 in the same /24 (not perfect, but better than nothing)
+    if [ -z "$GW" ]; then
+        local IP="${CIDR%/*}"
+        GW="${IP%.*}.1"
+        echo "[warn] ipcalc/python3 not found; using heuristics: $GW" >&2
+    fi
+
+    echo "$GW"
+}
 
 isPrivateIP() {
     local ip=$1
@@ -46,9 +97,27 @@ isPrivateIP() {
     [[ $ip == 10.* || $ip == 172.1[6-9].* || $ip == 172.2[0-9].* || $ip == 172.3[0-1].* || $ip == 192.168.* ]]
 }
 
+has_default_any() {
+    ip route show default | grep -q '^default '
+}
+
+has_default_on_iface() {
+    local IF="$1"
+    ip route show default dev "$IF" | grep -q '^default '
+}
+
+ensure_default_on_iface() {
+    local IF="$1"
+    local GW="$2"
+    # It is always more reliable to replace: if not, it will add; if it is, it will override the required IF/GW
+    ip route replace default via "$GW" dev "$IF"
+}
+
+# ---  end helpers block ---
+
 #  -- main  Cycle--
 
-for INTERFACE in  $VALID_INTERFACES
+for INTERFACE in  $INTERFACES
 do
 echo "------------------------------------------ begin cycle------------------------------------------------"
 echo ""
@@ -64,6 +133,18 @@ echo "Route table number is: $TABLE_NUMBER"
 
 # Get the gateway from the interface in the main table
 GATEWAY_IP=$(ip route show dev $INTERFACE | grep -i 'default via' | awk '{print $3}')
+
+if [ -z "$GATEWAY_IP" ]; then
+    DERIVED_GW=$(derive_gateway_from_iface "$INTERFACE")
+    if [ -n "$DERIVED_GW" ]; then
+        echo "No explicit default via on $INTERFACE; derived gateway: $DERIVED_GW"
+        GATEWAY_IP="$DERIVED_GW"
+    else
+        echo "[error] Cannot determine gateway for $INTERFACE (no default, no CIDR). Skipping."
+        exit 1
+        continue
+    fi
+fi
 
 echo "Gateway_IP is: $GATEWAY_IP"
 
@@ -94,14 +175,30 @@ ip rule
 echo  "routing table number $TABLE_NUMBER"
 ip route show table $TABLE_NUMBER
 
-# Remove the default rule for this interface from the main table
-if isPrivateIP $INTERFACE_IP; then
-        echo "$INTERFACE_IP is a private IP address. Deleting the default route for $INTERFACE."
-        ip route del default dev $INTERFACE
+# Remove / ensure default in MAIN table depending on IP class
+if isPrivateIP "$INTERFACE_IP"; then
+    echo "$INTERFACE_IP is private. Try to delete default on $INTERFACE (if present)."
+    if has_default_on_iface "$INTERFACE"; then
+        ip route del default dev "$INTERFACE" || true
+        echo "Default via $INTERFACE removed from main."
     else
-        echo "$INTERFACE_IP is a public IP address. Skipping route deletion."
-        
+        echo "No default bound to $INTERFACE in main — nothing to delete."
     fi
+else
+    echo "$INTERFACE_IP is public. Ensuring main default via $INTERFACE ($GATEWAY_IP)."
+    if [ -z "$GATEWAY_IP" ]; then
+        # in case it wasn't figured out before (Debian 11 case)
+        DERIVED_GW=$(derive_gateway_from_iface "$INTERFACE")
+        GATEWAY_IP="$DERIVED_GW"
+        echo "Derived gateway for $INTERFACE: $GATEWAY_IP"
+    fi
+    if has_default_on_iface "$INTERFACE"; then
+       echo " $INTERFACE already has default route"
+    else
+        ensure_default_on_iface "$INTERFACE" "$GATEWAY_IP"
+        echo "Main default is now via $INTERFACE ($GATEWAY_IP)." 
+    fi 
+fi
 
 done
 
